@@ -1,4 +1,4 @@
-# vpx_check_notif
+# vpx_check_update
 
 **Author:** Modhack  
 **Platform:** Batocera Linux  
