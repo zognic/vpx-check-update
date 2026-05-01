@@ -1,0 +1,331 @@
+#!/bin/bash
+# =============================================================================
+# vpx_check_notif — Batocera Service
+# Author  : Modhack
+# Purpose : When the vpinball system is selected in EmulationStation, scan all
+#           local .vpx files and notify if updates are available in the VPS DB.
+# Install : Copy to /userdata/system/services/vpx_check_notif
+#           Enable via ES > System Settings > Services
+# =============================================================================
+
+ES_SCRIPTS_DIR="/userdata/system/configs/emulationstation/scripts/system-selected"
+HOOK_SCRIPT="$ES_SCRIPTS_DIR/vpx_check_notif.sh"
+LOCKFILE="/tmp/vpx_check_notif.lock"
+
+case "$1" in
+
+    start)
+        # Create the ES scripts directory if it does not exist
+        mkdir -p "$ES_SCRIPTS_DIR"
+
+        # Write the ES system-selected hook script
+        cat > "$HOOK_SCRIPT" << 'HOOK'
+#!/bin/bash
+# =============================================================================
+# vpx_check_notif.sh — EmulationStation system-selected hook
+# Author  : Modhack
+# Trigger : Fired by ES every time vpinball system is highlighted in the system list
+# =============================================================================
+
+SYSTEM="$1"
+LOCKFILE="/tmp/vpx_check_notif.lock"
+
+# Only run when the vpinball system is selected
+if [ "$SYSTEM" != "vpinball" ]; then
+    exit 0
+fi
+
+# Prevent multiple simultaneous instances (DB download can be slow)
+if [ -f "$LOCKFILE" ]; then
+    exit 0
+fi
+
+# Run the checker in the background to avoid blocking EmulationStation
+(
+    touch "$LOCKFILE"
+
+    python3 - << 'PYTHON'
+# =============================================================================
+# VPX Version Checker — inline Python
+# Author  : Modhack
+# Purpose : Download the VPS database, match local .vpx files by title and
+#           author/team, compare versions, and send an ES overlay notification
+#           if any tables have updates available.
+# =============================================================================
+
+import os
+import re
+import subprocess
+import requests
+from pathlib import Path
+from difflib import SequenceMatcher
+
+VPS_JSON_URL = "https://virtualpinballspreadsheet.github.io/vps-db/db/vpsdb.json"
+DEFAULT_DIR  = Path("/userdata/roms/vpinball")
+
+# ---------------------------------------------------------------------------
+# String normalisation helpers
+# ---------------------------------------------------------------------------
+
+def norm_token(s):
+    """Strip everything except lowercase alphanumeric characters."""
+    return re.sub(r'[^a-z0-9]', '', s.lower())
+
+def extract_year(text):
+    """Extract the first 4-digit year found in a string."""
+    m = re.findall(r'\b(19[3-9]\d|20[0-2]\d|2030)\b', text)
+    return int(m[0]) if m else None
+
+def clean_title_for_match(filename):
+    """Remove parentheses, brackets, underscores and extra spaces from a filename stem."""
+    name = Path(filename).stem
+    for pat in (r"\([^)]*\)", r"\[[^\]]*\]", r"_+", r"-+", r"\s+"):
+        name = re.sub(pat, " ", name)
+    return name.strip()
+
+def extract_version_from_text(text):
+    """Return the last version string found in text (e.g. '1.2', 'v2.0.1')."""
+    m = re.findall(r'[vV]?(\d+(?:\.\d+){0,3})', text)
+    return m[-1] if m else None
+
+def normalize_version(ver):
+    """Convert a version string to a comparable tuple of ints."""
+    if not ver:
+        return None
+    cleaned = re.sub(r'[^0-9\.]', '', ver)
+    parts = [p for p in cleaned.split('.') if p]
+    if not parts:
+        return None
+    try:
+        return tuple(int(p) for p in parts)
+    except Exception:
+        return None
+
+def compare_versions(a, b):
+    """Return -1 if a < b, 0 if equal, 1 if a > b, None if not comparable."""
+    ta, tb = normalize_version(a), normalize_version(b)
+    if ta is None or tb is None:
+        return None
+    length = max(len(ta), len(tb))
+    ta += (0,) * (length - len(ta))
+    tb += (0,) * (length - len(tb))
+    return -1 if ta < tb else (1 if ta > tb else 0)
+
+# ---------------------------------------------------------------------------
+# Author / team canonicalisation
+# Known aliases are mapped to a single canonical token for comparison.
+# ---------------------------------------------------------------------------
+
+AUTHOR_CANON_MAP = {
+    "vpw": "vpw", "vpwteam": "vpw", "vpinworkshop": "vpw",
+    "virtualpinworkshop": "vpw", "vpinworkshopteam": "vpw",
+    "bigus": "bigus", "bigusmod": "bigus", "bigus1": "bigus",
+    "jpsalas": "jpsalas", "g5k": "g5k", "lwlost": "lw", "lw": "lw",
+}
+
+# Aliases detected from the filename itself (before any DB lookup)
+FILENAME_AUTHOR_ALIASES = {
+    "bigusmod": "Bigus1",
+    "bigus":    "Bigus1",
+    "vpwmod":   "VPin Workshop",
+    "vpw":      "VPin Workshop",
+}
+
+def canonical_author_token(s):
+    """Return the canonical token for a given author label."""
+    return AUTHOR_CANON_MAP.get(norm_token(s), norm_token(s))
+
+def collect_authors(db):
+    """Build a {normalized_name -> original_label} index from all VPX tableFiles."""
+    idx = {}
+    for entry in db:
+        for tf in (entry.get("tableFiles") or []):
+            if tf.get("tableFormat") != "VPX":
+                continue
+            for a in (tf.get("authors") or []):
+                s = a if isinstance(a, str) else str(a)
+                na = norm_token(s)
+                if na and na not in idx:
+                    idx[na] = s
+    return idx
+
+def detect_author_from_filename(filename, authors_index):
+    """
+    Detect author/team from the .vpx filename.
+    Returns (canonical_token, display_label) or (None, None).
+    Priority: explicit filename aliases > DB author tokens found in filename.
+    """
+    nfile = norm_token(Path(filename).stem)
+
+    # 1) Explicit filename aliases
+    for token, display in FILENAME_AUTHOR_ALIASES.items():
+        if token in nfile:
+            return canonical_author_token(display), display
+
+    # 2) Fallback: longest DB author token found in the filename
+    hits = [(len(na), orig) for na, orig in authors_index.items() if na and na in nfile]
+    if hits:
+        hits.sort(reverse=True)
+        chosen = hits[0][1]
+        return canonical_author_token(chosen), chosen
+
+    return None, None
+
+# ---------------------------------------------------------------------------
+# Table matching — fuzzy title comparison against the VPS database
+# ---------------------------------------------------------------------------
+
+def score_entry(entry, filename):
+    """
+    Compute a similarity score between a filename and a DB entry.
+    Bonuses are applied when the year matches (+0.20 exact, +0.10 within 1 year).
+    """
+    base  = clean_title_for_match(filename).lower()
+    year  = extract_year(filename)
+    ratio = SequenceMatcher(None, base, (entry.get("name") or "").lower()).ratio()
+
+    for alt in (entry.get("altNames") or []):
+        try:
+            ratio = max(ratio, SequenceMatcher(None, base, str(alt).lower()).ratio())
+        except Exception:
+            pass
+
+    if year and entry.get("year"):
+        try:
+            y = int(entry["year"])
+            if y == year:
+                ratio += 0.20
+            elif abs(y - year) <= 1:
+                ratio += 0.10
+        except Exception:
+            pass
+
+    return ratio
+
+def best_entry(db, filename, min_score=0.62):
+    """Return the best-matching VPS DB entry for a given filename, or None."""
+    cands = []
+    for e in db:
+        if not any(tf.get("tableFormat") == "VPX" for tf in (e.get("tableFiles") or [])):
+            continue
+        s = score_entry(e, filename)
+        if s >= min_score:
+            cands.append((s, e))
+    if not cands:
+        return None
+    cands.sort(key=lambda x: x[0], reverse=True)
+    return cands[0][1]
+
+def latest_vpx_for_author(entry, author_canon):
+    """
+    Return the most recent VPX tableFile matching the given canonical author token.
+    Falls back to any VPX file if no author match is found.
+    """
+    vpx_files = [tf for tf in (entry.get("tableFiles") or []) if tf.get("tableFormat") == "VPX"]
+    if not vpx_files:
+        return None
+
+    candidates = []
+    if author_canon:
+        for tf in vpx_files:
+            for a in (tf.get("authors") or []):
+                s = a if isinstance(a, str) else str(a)
+                if canonical_author_token(s) == author_canon:
+                    candidates.append(tf)
+                    break
+    else:
+        candidates = vpx_files
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda tf: (int(tf.get("updatedAt") or 0), int(tf.get("createdAt") or 0)),
+        reverse=True
+    )
+    return candidates[0]
+
+# ---------------------------------------------------------------------------
+# EmulationStation notification
+# ---------------------------------------------------------------------------
+
+def send_es_notification(count):
+    """Send an overlay notification to EmulationStation via its local HTTP API."""
+    msg = f"\uf192  {count} VPX table{'s' if count > 1 else ''} available for update"
+    try:
+        subprocess.run(
+            ["curl", "-s", "-X", "POST",
+             "http://localhost:1234/notify",
+             "-H", "Content-Type: text/plain",
+             "--data-raw", msg],
+            capture_output=True,
+            timeout=5
+        )
+    except Exception:
+        pass
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    if not DEFAULT_DIR.exists():
+        return
+
+    # Download the VPS database
+    try:
+        response = requests.get(VPS_JSON_URL, timeout=45)
+        response.raise_for_status()
+        db = response.json()
+    except Exception:
+        return
+
+    authors_index = collect_authors(db)
+    updates_available = 0
+
+    # Walk the vpinball roms directory recursively
+    for root, _, files in os.walk(DEFAULT_DIR):
+        for filename in files:
+            if not filename.lower().endswith(".vpx"):
+                continue
+
+            author_canon, _ = detect_author_from_filename(filename, authors_index)
+
+            entry = best_entry(db, filename)
+            if not entry:
+                continue
+
+            latest_tf = latest_vpx_for_author(entry, author_canon)
+            if not latest_tf:
+                continue
+
+            db_ver  = str(latest_tf.get("version") or "").strip() or None
+            loc_ver = extract_version_from_text(filename)
+
+            if compare_versions(loc_ver, db_ver) == -1:
+                updates_available += 1
+
+    if updates_available > 0:
+        send_es_notification(updates_available)
+
+main()
+PYTHON
+
+    rm -f "$LOCKFILE"
+) &
+
+exit 0
+HOOK
+
+        chmod +x "$HOOK_SCRIPT"
+        ;;
+
+    stop)
+        # Remove the ES hook and any leftover lockfile
+        rm -f "$HOOK_SCRIPT"
+        rm -f "$LOCKFILE"
+        ;;
+
+esac
+
+exit 0
