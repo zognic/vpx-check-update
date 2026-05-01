@@ -74,7 +74,7 @@ batocera-services start vpx_check_update
 Or from the EmulationStation UI:
 
 ```
-Main Menu → System Settings → Services → vpx_check_notif → Enable
+Main Menu → System Settings → Services → vpx_check_update → Enable
 ```
 
 ### 3. Verify installation
