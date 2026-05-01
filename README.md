@@ -62,7 +62,15 @@ cp vpx_check_update /userdata/system/services/
 > **Important:** The filename must contain only letters `A–Z`, digits `0–9` and underscores.  
 > Do **not** add a `.sh` extension — Batocera services must have no extension.
 
-### 2. Enable the service
+### 2. Make the service executable
+
+```bash
+chmod +x /userdata/system/services/vpx_check_update
+```
+
+> Without execute permission, Batocera will not be able to start the service.
+
+### 3. Enable the service
 
 Either from the command line:
 
@@ -77,7 +85,7 @@ Or from the EmulationStation UI:
 Main Menu → System Settings → Services → vpx_check_update → Enable
 ```
 
-### 3. Verify installation
+### 4. Verify installation
 
 After enabling, check that the ES hook was created:
 
@@ -156,4 +164,10 @@ Version numbers are extracted directly from the filename (e.g. `TableName (VPW) 
 **No match found for my tables**  
 - The fuzzy match threshold is `0.62` — tables with unusual naming may not match  
 - Version must be present in the filename for comparison to work
+
+---
+
+## License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
