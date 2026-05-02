@@ -167,6 +167,43 @@ Version numbers are extracted directly from the filename (e.g. `TableName (VPW) 
 
 ---
 
+## Standalone CLI (`utils/vpx_check_update.py`)
+
+A standalone Python version of the same matcher is provided in `utils/` for running outside of EmulationStation — useful for inspecting the full list of outdated tables, debugging fuzzy matches, or running on a desktop.
+
+```bash
+# scan the default Batocera directory
+./utils/vpx_check_update.py
+
+# scan an arbitrary directory
+./utils/vpx_check_update.py --dir ~/vpinball
+
+# also show files already up to date and files with no DB match
+./utils/vpx_check_update.py --all --no-match
+
+# cache the VPS DB locally so repeat runs are fast
+./utils/vpx_check_update.py --cache ~/.cache/vpsdb.json
+```
+
+Output is colored when run on a TTY and looks like:
+
+```
+Scanned: 42 file(s) under /userdata/roms/vpinball
+  up-to-date:      29
+  outdated:        8
+  unknown version: 2
+  no DB match:     3
+
+━━━ Updates available (8) ━━━
+  ↑ Futurama (Original 2024) v1.2.1.vpx              1.2.1 → 1.2.2  (Futurama 2024)
+  ↑ Terrifier (original)v1.0.1 -pg13.vpx             1.0.1 → 1.0.2  (Terrifier 2024)
+  …
+```
+
+Exit code is `1` when at least one table is outdated, `0` otherwise — handy for cron / CI use.
+
+---
+
 ## License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
